@@ -105,5 +105,5 @@ jobs:
       with:
         name: ${{ matrix.toolchain.name }}
         path: |
-          /home/runner/work/avian/avian/build/${{ matrix.toolchain.host }}/release/bin/avian-cli*
-          /home/runner/work/avian/avian/build/${{ matrix.toolchain.host }}/release/bin/aviand*
+          /home/runner/work/Avian/Avian/build/${{ matrix.toolchain.host }}/release/bin/avian-cli*
+          /home/runner/work/Avian/Avian/build/${{ matrix.toolchain.host }}/release/bin/aviand*
