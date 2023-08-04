@@ -1,5 +1,4 @@
-name: Continuous Integration
-
+name: Avian Build
 on:
   push:
     paths-ignore:
@@ -9,158 +8,529 @@ on:
       - 'doc/**'
       - 'contrib/**'
       - '**/*.md'
+env:
+  COIN_NAME: avian
+  BUILD_DIR: avian-build
+  COMPRESS_DIR: avian-compress
+  TEST_DIR: avian-test
 
 jobs:
-  build:
-    name: ${{ matrix.name }}
-
-    env:
-      MAKEJOBS: "-j3"
-      CHECK_DOC: "0"
-      CCACHE_SIZE: "100M"
-      CCACHE_TEMPDIR: /tmp/.ccache-temp
-      CCACHE_COMPRESS: "1"
-      PYTHON_DEBUG: "1"
-      WINEDEBUG: fixme-all
-      SDK_URL: https://bitcoincore.org/depends-sources/sdks
-
-    strategy:
-      fail-fast: false
-      matrix:
-        name:
-          - x86_64-linux
-          - x86_64-macos
-          - x86_64-win
-          - aarch64-linux
-          - armhf-linux
-        include:
-          - name: armhf-linux
-            host: arm-linux-gnueabihf
-            os: ubuntu-20.04
-            packages: g++-arm-linux-gnueabihf
-            run-tests: false
-            dep-opts: ""
-            config-opts: "--enable-gui=qt5 --enable-zmq --enable-glibc-back-compat --enable-reduce-exports"
-            goal: install
-          - name: aarch64-linux
-            host: aarch64-linux-gnu
-            os: ubuntu-20.04
-            packages: g++-aarch64-linux-gnu
-            run-tests: false
-            dep-opts: ""
-            config-opts: "--enable-gui=qt5 --enable-zmq --enable-glibc-back-compat --enable-reduce-exports"
-            goal: install
-          - name: x86_64-linux
-            host: x86_64-unknown-linux-gnu
-            os: ubuntu-20.04
-            packages: bc python3-zmq
-            run-tests: false
-            dep-opts: ""
-            config-opts: "--enable-gui=qt5 --enable-zmq --enable-glibc-back-compat --enable-reduce-exports"
-            goal: install
-            strip-cmd: "strip"
-          - name: x86_64-win
-            host: x86_64-w64-mingw32
-            arch: "i386"
-            os: ubuntu-20.04
-            packages: python3 nsis g++-mingw-w64-x86-64 wine64 bc wine-binfmt
-            postinstall: |
-              sudo update-alternatives --set x86_64-w64-mingw32-gcc  /usr/bin/x86_64-w64-mingw32-gcc-posix
-              sudo update-alternatives --set x86_64-w64-mingw32-g++  /usr/bin/x86_64-w64-mingw32-g++-posix
-              sudo update-binfmts --import /usr/share/binfmts/wine
-            run-tests: false
-            dep-opts: ""
-            config-opts: "--disable-shared --enable-gui=qt5"
-            goal: install
-            strip-cmd: "x86_64-w64-mingw32-strip"
-          - name: x86_64-macos
-            host: x86_64-apple-darwin11
-            os: ubuntu-18.04
-            packages: cmake imagemagick libcap-dev librsvg2-bin libz-dev libtiff-tools libtinfo5 python3-setuptools xorriso libtinfo5
-            run-tests: false
-            dep-opts: ""
-            config-opts: "--enable-gui=qt5 --enable-reduce-exports"
-            goal: install
-            sdk: 10.11
-            strip-cmd: "x86_64-apple-darwin11-strip"
-
-    runs-on: ${{ matrix.os }}
-
+  get-version:
+    name: Get Version
+    runs-on: ubuntu-latest
     steps:
-      - name: Add architecture
-        if: ${{ matrix.arch }}
+      - name: Triggered By
         run: |
-          sudo dpkg --add-architecture "${{ matrix.arch }}"
-
-      - name: Install packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install build-essential libtool autotools-dev automake pkg-config bsdmainutils curl ca-certificates ccache python3 rsync git procps bison
-          sudo apt-get install ${{ matrix.packages }}
-
-      - name: Post install
-        if: ${{ matrix.postinstall }}
-        run: ${{ matrix.postinstall }}
+          echo "checking out $GITHUB_REF triggered by $GITHUB_EVENT_NAME"
 
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
 
-      - name: SDK cache
-        if: ${{ matrix.sdk }}
-        uses: actions/cache@v2
-        env:
-          cache-name: sdk
+      - name: Read versions
+        id: versions
+        uses: christian-draeger/read-properties@1.1.1
         with:
-          path: ./depends/sdk-sources
-          key: ${{ matrix.name }}-${{ env.cache-name }}
+          path: build.properties
+          properties: 'release-version candidate-version snapshot-version'
 
-      - name: Install SDK
-        if: ${{ matrix.sdk }}
+      - name: Choose version
+        id: selected-version
+        shell: bash
         run: |
-          mkdir -p ./depends/sdk-sources
-          mkdir -p ./depends/SDKs
-          curl --location --fail $SDK_URL/MacOSX${{ matrix.sdk }}.sdk.tar.gz -o depends/sdk-sources/MacOSX${{ matrix.sdk }}.sdk.tar.gz
-          tar -C depends/SDKs -xf depends/sdk-sources/MacOSX${{ matrix.sdk }}.sdk.tar.gz
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]] || [[ "$GITHUB_REF" == *develop ]] || [[ "$GITHUB_REF" == *ft/* ]] || [[ "$GITHUB_REF" == *bug/* ]]; then
+              version=${{ steps.versions.outputs.snapshot-version }}
+          elif [[ "$GITHUB_EVENT_NAME" != "pull_request" ]] && [[ "$GITHUB_REF" == *"release/"* ]]; then
+              version=${{ steps.versions.outputs.candidate-version }}
+          elif [[ "$GITHUB_EVENT_NAME" != "pull_request" ]] && [[ "$GITHUB_REF" == "refs/heads/master" ]]; then
+              version=${{ steps.versions.outputs.release-version }}
+          fi
+          echo "version is: [$version]"
+          echo "version=$version" >> $GITHUB_OUTPUT
+          echo "BUILD_VERSION=$version" > version.txt
 
-      - name: Dependency cache
-        uses: actions/cache@v2
-        env:
-          cache-name: depends
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v3
         with:
-          path: ./depends/built
-          key: ${{ matrix.name }}-${{ env.cache-name }}-cache-${{ hashFiles('depends/packages/*') }}
+          name: version
+          path: version.txt
 
-      - name: Build depends
+    outputs:
+      version: ${{ steps.selected-version.outputs.version }}
+
+  build-ubuntu20:
+    name: Ubuntu 20 Build
+    needs: get-version
+    runs-on: ubuntu-20.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install Required Packages
         run: |
-          make $MAKEJOBS -C depends HOST=${{ matrix.host }} ${{ matrix.dep-opts }}
-
-      - name: CCache
-        uses: actions/cache@v2
-        env:
-          cache-name: ccache
-        with:
-          path: ~/.ccache
-          key: ${{ matrix.name }}-${{ env.cache-name }}-${{ hashFiles('**/configure.ac') }}
-
-      - name: Build Avian Core
+          sudo apt-get update -y
+          sudo apt-get install build-essential libtool autotools-dev automake pkg-config bsdmainutils python3 -y
+      - name: Build Depends
         run: |
-          depends/${{ matrix.host }}/native/bin/ccache --max-size=$CCACHE_SIZE
+          echo "building with $(nproc) threads"
+          gcc --version
+          make -C depends -j$(nproc)  HOST=x86_64-pc-linux-gnu
+
+      - name: Configure
+        run: |
           ./autogen.sh
-          ./configure --prefix=`pwd`/depends/${{ matrix.host }} ${{ matrix.config-opts }} || ( cat config.log && false)
-          make $MAKEJOBS ${{ matrix.goal }} || ( echo "Build failure. Verbose build follows." && make ${{ matrix.goal }} V=1 ; false )
-          
-      - name: Strip built binaries
-        run: |
-          ${{ matrix.strip-cmd }} depends/${{ matrix.host }}/bin/aviand* src/qt/avian-qt* src/avian-cli* dist/Avian-Qt.app* || ( echo "Failed stripping builds. The build will have a bigger file size" )
+          ./configure --prefix=`pwd`/depends/x86_64-pc-linux-gnu
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v2
+      - name: Build Binaries
+        run: |
+          make -j$(nproc)
+          mkdir -p ${BUILD_DIR} ${BUILD_DIR}_not_strip ${TEST_DIR}
+          cp src/{avian-cli,aviand,qt/avian-qt} ${BUILD_DIR}/
+          mv src/{avian-cli,aviand,qt/avian-qt} ${BUILD_DIR}_not_strip/
+          mv src/test/test_avian ${TEST_DIR}
+          strip ${BUILD_DIR}/*
+
+      - name: Build Debug Binaries
+        run: |
+          make clean
+          make distclean
+          ./autogen.sh
+          ./configure --prefix=`pwd`/depends/x86_64-pc-linux-gnu
+          make -j$(nproc)
+          mkdir -p ${BUILD_DIR}_debug
+          mv src/{avian-cli,aviand,qt/avian-qt} ${BUILD_DIR}_debug/
+
+      - name: Generate Checksum and Compress
+        run: |
+          mkdir -p ${COMPRESS_DIR}
+          cd ${BUILD_DIR}
+          echo "sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          shasum * >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          echo "openssl-sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          sha256sum * >> checksums.txt
+          cat checksums.txt
+          tar -cvzf ../${COIN_NAME}-ubuntu20-${{ needs.get-version.outputs.version }}.tar.gz *          
+          cd ../${BUILD_DIR}_debug
+          echo "sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          shasum * >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          echo "openssl-sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          sha256sum * >> checksums.txt
+          cat checksums.txt
+          tar -cvzf ../${COIN_NAME}-ubuntu20-debug-${{ needs.get-version.outputs.version }}.tar.gz *
+          cd ../${BUILD_DIR}_not_strip
+          echo "sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          shasum * >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          echo "openssl-sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          sha256sum * >> checksums.txt
+          cat checksums.txt
+          tar -cvzf ../${COIN_NAME}-ubuntu20-not_strip-${{ needs.get-version.outputs.version }}.tar.gz *
+          cd ..
+          mv *.tar.gz ${COMPRESS_DIR}/
+          cd ${COMPRESS_DIR}
+          echo "sha256: `shasum ${COIN_NAME}-ubuntu20-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          echo "openssl-sha256: `sha256sum ${COIN_NAME}-ubuntu20-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          echo "sha256: `shasum ${COIN_NAME}-ubuntu20-debug-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          echo "openssl-sha256: `sha256sum ${COIN_NAME}-ubuntu20-debug-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          echo "sha256: `shasum ${COIN_NAME}-ubuntu20-not_strip-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          echo "openssl-sha256: `sha256sum ${COIN_NAME}-ubuntu20-not_strip-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          cd ..
+          cat ${COMPRESS_DIR}/checksums.txt
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v3
         with:
-          name: avian-${{ github.sha }}-${{ matrix.name }}
-          path: |
-            depends/${{ matrix.host }}/bin/aviand*
-            src/qt/avian-qt
-            src/qt/avian-qt.exe
-            src/avian-cli
-            src/avian-cli.exe
-            dist/Avian-Qt.app
+          name: ${{ env.COIN_NAME }}-ubuntu20-${{ needs.get-version.outputs.version }}
+          path: ${{ env.COMPRESS_DIR }}
+
+      - name: Upload Test Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.COIN_NAME }}-ubuntu20-test-${{ needs.get-version.outputs.version }}
+          path: ${{ env.TEST_DIR }}
+
+  build-ubuntu22:
+    name: Ubuntu 22 Build
+    needs: get-version
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install Required Packages
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install build-essential libtool autotools-dev automake pkg-config bsdmainutils python3 -y
+
+      - name: Build Depends
+        run: |
+          echo "building with $(nproc) threads"
+          gcc --version
+          make -C depends -j$(nproc)  HOST=x86_64-pc-linux-gnu
+
+      - name: Configure
+        run: |
+          ./autogen.sh
+          ./configure --prefix=`pwd`/depends/x86_64-pc-linux-gnu
+
+      - name: Build Binaries
+        run: |
+          make -j$(nproc)
+          mkdir -p ${BUILD_DIR} ${BUILD_DIR}_not_strip ${TEST_DIR}
+          cp src/{avian-cli,aviand,qt/avian-qt} ${BUILD_DIR}/
+          mv src/{avian-cli,aviand,qt/avian-qt} ${BUILD_DIR}_not_strip/
+          mv src/test/test_avian ${TEST_DIR}
+          strip ${BUILD_DIR}/*
+
+      - name: Build Debug Binaries
+        run: |
+          make clean
+          make distclean
+          ./autogen.sh
+          ./configure --prefix=`pwd`/depends/x86_64-pc-linux-gnu
+          make -j$(nproc)
+          mkdir -p ${BUILD_DIR}_debug
+          mv src/{avian-cli,aviand,qt/avian-qt} ${BUILD_DIR}_debug/
+
+      - name: Generate Checksum and Compress
+        run: |
+          mkdir -p ${COMPRESS_DIR}
+          cd ${BUILD_DIR}
+          echo "sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          shasum * >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          echo "openssl-sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          sha256sum * >> checksums.txt
+          cat checksums.txt
+          tar -cvzf ../${COIN_NAME}-ubuntu22-${{ needs.get-version.outputs.version }}.tar.gz *          
+          cd ../${BUILD_DIR}_debug
+          echo "sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          shasum * >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          echo "openssl-sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          sha256sum * >> checksums.txt
+          cat checksums.txt
+          tar -cvzf ../${COIN_NAME}-ubuntu22-debug-${{ needs.get-version.outputs.version }}.tar.gz *
+          cd ../${BUILD_DIR}_not_strip
+          echo "sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          shasum * >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          echo "openssl-sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          sha256sum * >> checksums.txt
+          cat checksums.txt
+          tar -cvzf ../${COIN_NAME}-ubuntu22-not_strip-${{ needs.get-version.outputs.version }}.tar.gz *
+          cd ..
+          mv *.tar.gz ${COMPRESS_DIR}/
+          cd ${COMPRESS_DIR}
+          echo "sha256: `shasum ${COIN_NAME}-ubuntu22-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          echo "openssl-sha256: `sha256sum ${COIN_NAME}-ubuntu22-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          echo "sha256: `shasum ${COIN_NAME}-ubuntu22-debug-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          echo "openssl-sha256: `sha256sum ${COIN_NAME}-ubuntu22-debug-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          echo "sha256: `shasum ${COIN_NAME}-ubuntu22-not_strip-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          echo "openssl-sha256: `sha256sum ${COIN_NAME}-ubuntu22-not_strip-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          cd ..
+          cat ${COMPRESS_DIR}/checksums.txt
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.COIN_NAME }}-ubuntu22-${{ needs.get-version.outputs.version }}
+          path: ${{ env.COMPRESS_DIR }}
+
+      - name: Upload Test Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.COIN_NAME }}-ubuntu22-test-${{ needs.get-version.outputs.version }}
+          path: ${{ env.TEST_DIR }}
+
+  build-macos:
+    name: macOS 11 Build
+    needs: get-version
+    runs-on: macos-11
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install Required Packages
+        run: |
+          brew install automake libtool pkg-config miniupnpc librsvg libnatpmp zeromq python
+          pip3 install ds_store mac_alias
+
+      - name: Build Depends
+        run: |
+          echo "building with 8 threads"
+          make -C depends -j8
+
+      - name: Configure
+        run: |
+          ./autogen.sh
+          ./configure --prefix=`pwd`/depends/x86_64-apple-darwin20.6.0
+
+      - name: Build Binaries
+        run: |
+          make -j8
+          mkdir -p ${BUILD_DIR} ${BUILD_DIR}_not_strip ${TEST_DIR}
+          cp src/{avian-cli,aviand,qt/avian-qt} ${BUILD_DIR}/
+          mv src/{avian-cli,aviand,qt/avian-qt} ${BUILD_DIR}_not_strip/
+          mv src/test/test_avian ${TEST_DIR}
+          strip ${BUILD_DIR}/*
+
+      - name: Generate Checksum and Compress
+        run: |
+          cd ${BUILD_DIR}
+          echo "sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          shasum * >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          echo "openssl-sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          openssl sha256 * >> checksums.txt
+          cat checksums.txt
+          tar -cvzf ../${COIN_NAME}-macos-${{ needs.get-version.outputs.version }}.tar.gz *
+          cd ../${BUILD_DIR}_not_strip
+          echo "sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          shasum * >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          echo "openssl-sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          openssl sha256 * >> checksums.txt
+          cat checksums.txt
+          tar -cvzf ../${COIN_NAME}-macos-not_strip-${{ needs.get-version.outputs.version }}.tar.gz *
+          cd ..
+          mkdir -p ${COMPRESS_DIR}
+          mv *.tar.gz ${COMPRESS_DIR}/
+          cd ${COMPRESS_DIR}
+          echo "sha256: `shasum ${COIN_NAME}-macos-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          echo "openssl-sha256: `openssl sha256 ${COIN_NAME}-macos-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          echo "sha256: `shasum ${COIN_NAME}-macos-not_strip-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          echo "openssl-sha256: `openssl sha256 ${COIN_NAME}-macos-not_strip-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          cat checksums.txt
+          cd ..
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.COIN_NAME }}-macos-${{ needs.get-version.outputs.version }}
+          path: ${{ env.COMPRESS_DIR }}
+
+      - name: Upload Test Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.COIN_NAME }}-macos-test-${{ needs.get-version.outputs.version }}
+          path: ${{ env.TEST_DIR }}
+
+      - name: Generate Macos dmg files
+        run: |
+          make deploy
+          mkdir -p macos-dmg
+          mv Nowp.dmg macos-dmg/
+          cd macos-dmg
+          echo "sha256: `shasum Nowp.dmg`" >> checksums.txt
+          echo "openssl-sha256: `openssl sha256 Nowp.dmg`" >> checksums.txt
+          cd ..
+
+      - name: Upload dmg file
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.COIN_NAME }}-dmg-${{ needs.get-version.outputs.version }}
+          path: macos-dmg
+
+  build-arm-64:
+    name: ARM 64-bit Build
+    needs: get-version
+    runs-on: ubuntu-20.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install Required Packages
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install curl build-essential libtool g++-aarch64-linux-gnu autotools-dev automake pkg-config python3 bsdmainutils cmake -y
+
+      - name: Build Depends
+        run: |
+          echo "building with $(nproc) threads"
+          make -C depends -j$(nproc) HOST=aarch64-linux-gnu
+
+      - name: Configure
+        run: |
+          ./autogen.sh
+          ./configure --prefix=`pwd`/depends/aarch64-linux-gnu
+
+      - name: Build Binaries
+        run: |
+          make -j$(nproc)
+          mkdir -p ${BUILD_DIR} ${TEST_DIR}
+          mv src/{avian-cli,aviand,qt/avian-qt} ${BUILD_DIR}/
+          mv src/test/test_avian ${TEST_DIR}/
+
+      - name: Build Debug Binaries
+        run: |
+          make clean
+          make distclean
+          ./autogen.sh
+          ./configure --prefix=`pwd`/depends/aarch64-linux-gnu
+          make -j$(nproc)
+          mkdir -p ${BUILD_DIR}_debug
+          mv src/{avian-cli,aviand,qt/avian-qt} ${BUILD_DIR}_debug/
+
+      - name: Generate Checksum and Compress
+        run: |
+          mkdir -p ${COMPRESS_DIR}
+          cd ${BUILD_DIR}
+          echo "sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          shasum * >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          echo "openssl-sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          sha256sum * >> checksums.txt
+          cat checksums.txt
+          tar -cvzf ../${COIN_NAME}-arm64-${{ needs.get-version.outputs.version }}.tar.gz *          
+          cd ../${BUILD_DIR}_debug
+          echo "sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          shasum * >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          echo "openssl-sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          sha256sum * >> checksums.txt
+          cat checksums.txt
+          tar -cvzf ../${COIN_NAME}-arm64-debug-${{ needs.get-version.outputs.version }}.tar.gz *
+          cd ..
+          mv *.tar.gz ${COMPRESS_DIR}/
+          cd ${COMPRESS_DIR}
+          echo "sha256: `shasum ${COIN_NAME}-arm64-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          echo "openssl-sha256: `sha256sum ${COIN_NAME}-arm64-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          echo "sha256: `shasum ${COIN_NAME}-arm64-debug-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          echo "openssl-sha256: `sha256sum ${COIN_NAME}-arm64-debug-${{ needs.get-version.outputs.version }}.tar.gz`" >> checksums.txt
+          cd ..
+          cat ${COMPRESS_DIR}/checksums.txt
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.COIN_NAME }}-arm64-${{ needs.get-version.outputs.version }}
+          path: ${{ env.COMPRESS_DIR }}
+  
+      - name: Upload Test Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.COIN_NAME }}-arm64-test-${{ needs.get-version.outputs.version }}
+          path: ${{ env.TEST_DIR }}
+
+  build-win64:
+    name: Win64 Build
+    needs: get-version
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Install Required Packages
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install build-essential libtool autotools-dev automake pkg-config bsdmainutils python3 -y
+          sudo apt-get install -y g++-mingw-w64-x86-64 gcc-mingw-w64-x86-64 nsis
+          sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+          sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+
+      - name: Build Depends
+        run: |
+          echo "building with $(nproc) threads"
+          make -C depends -j$(nproc) HOST=x86_64-w64-mingw32
+
+      - name: Configure
+        run: |
+          ./autogen.sh
+          ./configure --prefix=`pwd`/depends/x86_64-w64-mingw32
+
+      - name: Build Binaries
+        run: |
+          make -j$(nproc)
+          mkdir -p ${BUILD_DIR} ${BUILD_DIR}_not_strip ${TEST_DIR}
+          cp src/{avian-cli.exe,aviand.exe,qt/avian-qt.exe} ${BUILD_DIR}/
+          mv src/{avian-cli.exe,aviand.exe,qt/avian-qt.exe} ${BUILD_DIR}_not_strip/
+          mv src/test/test_avian.exe ${TEST_DIR}
+          strip ${BUILD_DIR}/*
+
+      - name: Generate Checksum and Compress
+        run: |
+          cd ${BUILD_DIR}
+          echo "sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          shasum * >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          echo "openssl-sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          sha256sum * >> checksums.txt
+          cat checksums.txt
+          zip -r ../${COIN_NAME}-win-${{ needs.get-version.outputs.version }}.zip .
+          cd ../${BUILD_DIR}_not_strip
+          echo "sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          shasum * >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          echo "openssl-sha256:" >> checksums.txt
+          echo "------------------------------------" >> checksums.txt
+          sha256sum * >> checksums.txt
+          cat checksums.txt
+          zip -r ../${COIN_NAME}-win-not_strip-${{ needs.get-version.outputs.version }}.zip .
+          cd ..
+          mkdir -p ${COMPRESS_DIR}
+          mv *.zip ${COMPRESS_DIR}/
+          cd ${COMPRESS_DIR}
+          echo "sha256:         `shasum    ${COIN_NAME}-win-${{ needs.get-version.outputs.version }}.zip`" >> checksums.txt
+          echo "openssl-sha256: `sha256sum ${COIN_NAME}-win-${{ needs.get-version.outputs.version }}.zip`" >> checksums.txt
+          echo "sha256:         `shasum    ${COIN_NAME}-win-not_strip-${{ needs.get-version.outputs.version }}.zip`" >> checksums.txt
+          echo "openssl-sha256: `sha256sum ${COIN_NAME}-win-not_strip-${{ needs.get-version.outputs.version }}.zip`" >> checksums.txt
+          cat checksums.txt
+          cd ..
+          
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.COIN_NAME }}-win-${{ needs.get-version.outputs.version }}
+          path: ${{ env.COMPRESS_DIR }}
+
+      - name: Upload Test Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.COIN_NAME }}-win-test-${{ needs.get-version.outputs.version }}
+          path: ${{ env.TEST_DIR }}
+
+      - name: Generate Windows installation file
+        run: |
+          make deploy
+          mkdir win64-installation
+          mv *.exe win64-installation/
+          cd win64-installation
+          echo "sha256: `shasum *.exe`" >> checksums.txt
+          echo "openssl-sha25: `sha256sum *.exe`" >> checksums.txt
+          cd ..
+
+      - name: Upload Win64 installation file
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.COIN_NAME }}-win-installation-${{ needs.get-version.outputs.version }}
+          path: win64-installation
